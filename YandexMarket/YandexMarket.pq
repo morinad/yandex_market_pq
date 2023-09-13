@@ -7,8 +7,8 @@ shared YandexMarket.Data = Value.ReplaceType(YandexMarket.Func, FuncType);
 FuncType = type function (
       
     campaign  as (type text meta 
-    [
-        Documentation.FieldCaption = "ID кампании:",
+    [ 
+        Documentation.FieldCaption = "ID кампании (для заказов) / ID кабинета (для товаров):",
         Documentation.SampleValues = {"12345678"}
     ]),
      
@@ -35,67 +35,89 @@ FuncType = type function (
 
 YandexMarket.Func =(campaign as text, reportType as text)=>
 let
-res = if reportType="products" then getProducts(campaign, Extension.CurrentCredential()[Key]) else getOrders(campaign, Extension.CurrentCredential()[Key])
+res = if reportType="products" then getOfferMappings(campaign, Extension.CurrentCredential()[Key]) else getOrdersStats(campaign, Extension.CurrentCredential()[Key])
 in res;
 
 
-getProductsPageToken = (campaign as text, token as text, pageToken as text)=>
+
+getOfferMappingsData = (businessId as text, token as text, nextPageToken as  text)=>
 let
-headers=[#"Content-Type" = "application/json", #"Authorization" = "OAuth oauth_token="""& token &""", oauth_client_id=""19fc862db7c6454991393f447c2ba58b"""],
-querydata = [ page_token = pageToken ],
-web = Web.Contents("https://api.partner.market.yandex.ru", [RelativePath = "v2/campaigns/"& campaign &"/offer-mapping-entries.json", Headers = headers, ManualStatusHandling = {404, 400}, Query =querydata]),
+headers=[#"Authorization" = "Bearer " & token ],
+querydata = [#"limit" = "200", #"page_token" = nextPageToken],
+jsondata = Json.FromValue( Json.Document(Text.ToBinary("{}"))),
+web = Web.Contents("https://api.partner.market.yandex.ru/", [RelativePath = "businesses/" & businessId & "/offer-mappings", Headers = headers, ManualStatusHandling = {404, 400}, Query =querydata, Content = jsondata]),
 result = Json.Document(web),
-result1 = result[result],
-paging = result1[paging],
-nextPageToken = try paging[nextPageToken] otherwise null
-in nextPageToken;
+    result1 = result[result],
+    offerMappings = result1[offerMappings],
+    #"Преобразовано в таблицу" = Table.FromList(offerMappings, Splitter.SplitByNothing(), null, null, ExtraValues.Error),
+    #"Развернутый элемент Column1" = Table.ExpandRecordColumn(#"Преобразовано в таблицу", "Column1", {"offer", "mapping"}, {"offer", "mapping"})
+in   #"Развернутый элемент Column1";
 
 
-getProducts = (campaign as text, token as text)=>
+getOfferMappingsNextPageToken = (businessId as text, token as text, nextPageToken as  text)=>
 let
-tokenList = List.FirstN(List.Generate(()=> "", each _ <> null, each getProductsPageToken( campaign, token,  _ )),100),
+headers=[#"Authorization" = "Bearer " & token ],
+querydata = [#"limit" = "200", #"page_token" = nextPageToken],
+jsondata = Json.FromValue( Json.Document(Text.ToBinary("{}"))),
+web = Web.Contents("https://api.partner.market.yandex.ru/", [RelativePath = "businesses/" & businessId & "/offer-mappings", Headers = headers, ManualStatusHandling = {404, 400}, Query =querydata, Content = jsondata]),
+result = Json.Document(web),
+    result1 = result[result],
+    paging = result1[paging],
+    nextPageTokenD = paging[nextPageToken]
+in   nextPageTokenD;
+
+
+getOfferMappings= (businessId as text, token as text)=>
+let
+tokenList = List.FirstN(List.Generate(()=> "", each _ <> null, each  try getOfferMappingsNextPageToken( businessId, token,  _ ) otherwise null),1000),
 #"Преобразовано в таблицу" = Table.FromList(tokenList, Splitter.SplitByNothing(), null, null, ExtraValues.Error),
 #"Переименованные столбцы" = Table.RenameColumns(#"Преобразовано в таблицу",{{"Column1", "page_token"}}),
-#"Добавлен пользовательский объект" = Table.AddColumn(#"Переименованные столбцы", "data", each getProductsData(campaign, token,[page_token] )),
-#"Развернутый элемент data" = Table.ExpandListColumn(#"Добавлен пользовательский объект", "data"),
-#"Удаленные столбцы" = Table.RemoveColumns(#"Развернутый элемент data",{"page_token"})
-in #"Удаленные столбцы";
+#"Добавлен пользовательский объект" = Table.AddColumn(#"Переименованные столбцы", "data", each try getOfferMappingsData(businessId, token,[page_token] ) otherwise null ),
+    #"Строки с примененным фильтром" = Table.SelectRows(#"Добавлен пользовательский объект", each ([data] <> null)),
+#"Развернутый элемент data" = Table.ExpandListColumn(#"Строки с примененным фильтром", "data"),
+#"Удаленные столбцы" = Table.RemoveColumns(#"Развернутый элемент data",{"page_token"}),
+    #"Развернутый элемент data1" = Table.ExpandRecordColumn(#"Удаленные столбцы", "data", {"offer", "mapping"}, {"offer", "mapping"})
+in  #"Развернутый элемент data1";
 
 
-getOrders = (campaign as text, token as text)=>
+getOrdersStatsData = (campaignId as text, token as text, nextPageToken as  text)=>
 let
-pageList = {1..getOrdersPageCounts(token, campaign)},
-#"Преобразовано в таблицу" = Table.FromList(pageList, Splitter.SplitByNothing(), null, null, ExtraValues.Error),
-#"Переименованные столбцы" = Table.RenameColumns(#"Преобразовано в таблицу",{{"Column1", "page"}}),
-#"Измененный тип" = Table.TransformColumnTypes(#"Переименованные столбцы",{{"page", type text}}),
-#"Добавлен пользовательский объект" = Table.AddColumn(#"Измененный тип", "data", each Table.FromList(Json.Document(Web.Contents("https://api.partner.market.yandex.ru", [RelativePath = "v2/campaigns/"& campaign &"/orders.json", Headers = [#"Content-Type" = "application/json", #"Authorization" = "OAuth oauth_token="""& token &""", oauth_client_id=""19fc862db7c6454991393f447c2ba58b"""], ManualStatusHandling = {404, 400}, Query =[ page = [page] ]]))[orders], Splitter.SplitByNothing(), null, null, ExtraValues.Error)),
-#"Развернутый элемент data" = Table.ExpandTableColumn(#"Добавлен пользовательский объект", "data", {"Column1"}, {"data"}),
-#"Удаленные столбцы" = Table.RemoveColumns(#"Развернутый элемент data",{"page"})
-in #"Удаленные столбцы";
-
-
-getOrdersPageCounts=(token as text, campaign as text) =>
-let
-page = "1",
-headers=[#"Content-Type" = "application/json", #"Authorization" = "OAuth oauth_token="""& token &""", oauth_client_id=""19fc862db7c6454991393f447c2ba58b"""],
-querydata = [ page = page ],
-web = Web.Contents("https://api.partner.market.yandex.ru", [RelativePath = "v2/campaigns/"& campaign &"/orders.json", Headers = headers, ManualStatusHandling = {404, 400}, Query =querydata]),
+headers=[#"Authorization" = "Bearer " & token ],
+querydata = [#"limit" = "200", #"page_token" = nextPageToken],
+jsondata = Json.FromValue( Json.Document(Text.ToBinary("{}"))),
+web = Function.InvokeAfter(()=> Web.Contents("https://api.partner.market.yandex.ru/", [RelativePath = "campaigns/" & campaignId & "/stats/orders", Headers = headers, ManualStatusHandling = {404, 400}, Query =querydata, Content = jsondata]), #duration(0,0,0,0.1)),
 result = Json.Document(web),
-pager = result[pager],
-pagesCount = Number.From(pager[pagesCount])
-in pagesCount;
+    result1 = result[result],
+    orders = result1[orders],
+    #"Преобразовано в таблицу" = Table.FromList(orders, Splitter.SplitByNothing(), null, null, ExtraValues.Error),
+    #"Переименованные столбцы" = Table.RenameColumns(#"Преобразовано в таблицу",{{"Column1", "data"}})
+in   #"Переименованные столбцы";
+    
 
-
-getProductsData = (campaign, token, pageToken)=>
+getOrdersStatsNextPageToken = (campaignId as text, token as text, nextPageToken as  text)=>
 let
-headers=[#"Content-Type" = "application/json", #"Authorization" = "OAuth oauth_token="""& token &""", oauth_client_id=""19fc862db7c6454991393f447c2ba58b"""],
-querydata = [ page_token = pageToken ],
-web = Web.Contents("https://api.partner.market.yandex.ru", [RelativePath = "v2/campaigns/"& campaign &"/offer-mapping-entries.json", Headers = headers, ManualStatusHandling = {404, 400}, Query =querydata]),
+headers=[#"Authorization" = "Bearer " & token ],
+querydata = [#"limit" = "200", #"page_token" = nextPageToken],
+jsondata = Json.FromValue( Json.Document(Text.ToBinary("{}"))),
+web = Function.InvokeAfter(()=>Web.Contents("https://api.partner.market.yandex.ru/", [RelativePath = "campaigns/" & campaignId & "/stats/orders", Headers = headers, ManualStatusHandling = {404, 400}, Query =querydata, Content = jsondata]), #duration(0,0,0,0.1)),
 result = Json.Document(web),
-result1 = result[result],
-offerMappingEntries = result1[offerMappingEntries]
-in offerMappingEntries;
+    result1 = result[result],
+    paging = result1[paging],
+    nextPageTokenD = paging[nextPageToken]
+in   nextPageTokenD;
 
+
+getOrdersStats = (campaignId as text, token as text)=>
+let
+tokenList = List.FirstN(List.Generate(()=> "", each _ <> null, each  try getOrdersStatsNextPageToken( campaignId, token,  _ ) otherwise null),1000),
+#"Преобразовано в таблицу" = Table.FromList(tokenList, Splitter.SplitByNothing(), null, null, ExtraValues.Error),
+#"Переименованные столбцы" = Table.RenameColumns(#"Преобразовано в таблицу",{{"Column1", "page_token"}}),
+#"Добавлен пользовательский объект" = Table.AddColumn(#"Переименованные столбцы", "data", each try getOrdersStatsData(campaignId, token,[page_token] ) otherwise null ),
+    #"Строки с примененным фильтром" = Table.SelectRows(#"Добавлен пользовательский объект", each ([data] <> null)),
+#"Развернутый элемент data" = Table.ExpandListColumn(#"Строки с примененным фильтром", "data"),
+    #"Удаленные столбцы" = Table.RemoveColumns(#"Развернутый элемент data",{"page_token"}),
+    #"Развернутый элемент data1" = Table.ExpandRecordColumn(#"Удаленные столбцы", "data", {"data"}, {"data"})
+in  #"Развернутый элемент data1";
 
 
 YandexMarket = [
